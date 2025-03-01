@@ -1,138 +1,147 @@
-# sentiment/views.py
+# sentiment_app/sentiment_model.py
 
-import pandas as pd
-import nltk
+import os
 import re
 import string
-from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
-from nltk.corpus import twitter_samples
+import pickle
+import pandas as pd
+import nltk
+from nltk.corpus import twitter_samples, stopwords
 from nltk.tokenize import TweetTokenizer
-from nltk.corpus import stopwords
 from nltk.stem import PorterStemmer
 from sklearn.model_selection import train_test_split
-from sklearn.naive_bayes import GaussianNB
+from sklearn.naive_bayes import MultinomialNB
+from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
+from sklearn.feature_extraction.text import CountVectorizer
 from django.shortcuts import render
+from sklearn.feature_extraction.text import TfidfVectorizer
 
-
-
-#حملنة المكاتب
 nltk.download('twitter_samples')
-nltk.download('punkt')
 nltk.download('stopwords')
-
+nltk.download('punkt')
 
 stop_words = set(stopwords.words('english'))
 
 
-def stem_words(tokens):
+def custom_preprocessor(tweet):
+    tweet = re.sub(r"http\S+|www\S+|https\S+", '', tweet, flags=re.MULTILINE)
+    tweet = re.sub(r'@\w+', '', tweet)
+    tweet = re.sub(r'\$\w+', '', tweet)
+    tweet = re.sub(r'^rt', '', tweet)
+    tweet = re.sub(r'#', '', tweet)
+    return tweet.lower().strip()
+
+
+def custom_tokenizer(tweet):
+    tokenizer = TweetTokenizer()
+    tokens = tokenizer.tokenize(tweet)
+    tokens = [word for word in tokens if word not in stop_words and word not in string.punctuation]
     stemmer = PorterStemmer()
     return [stemmer.stem(word) for word in tokens]
 
-def preprocess(tweet):
-    tweet = re.sub(r"http\S+|www\S+|https\S+", '', tweet, flags=re.MULTILINE)  
-    tweet = re.sub(r'@\w+', '', tweet)  
-    tweet = re.sub(r'\$\w+', '', tweet)  
-    tweet = re.sub(r'^rt', '', tweet)  
-    tweet = re.sub(r'#', '', tweet)  
-    tweet = tweet.lower()  
-    tweet = tweet.strip()   
-    tokens = TweetTokenizer().tokenize(tweet) 
-    tokens = [word for word in tokens if word not in stop_words and word not in string.punctuation ]
-    return stem_words(tokens)
 
-def sentiment_analysis(text):
-    positive_tweets = twitter_samples.strings('positive_tweets.json')
-    negative_tweets = twitter_samples.strings('negative_tweets.json')
+positive_tweets = twitter_samples.strings('positive_tweets.json')
+negative_tweets = twitter_samples.strings('negative_tweets.json')
 
-    positive_df = pd.DataFrame(positive_tweets, columns=['tweet'])
-    positive_df['label'] = 1
-    negative_df = pd.DataFrame(negative_tweets, columns=['tweet'])
-    negative_df['label'] = 0
 
-    all_tweets_df = pd.concat([positive_df, negative_df], ignore_index=True)
+positive_df = pd.DataFrame(positive_tweets, columns=['tweet'])
+positive_df['label'] = 1
+negative_df = pd.DataFrame(negative_tweets, columns=['tweet'])
+negative_df['label'] = 0
 
-    def create_frequency_dict(tweets, labels):
-        freq = {}
-        for tweet, y in zip(tweets, labels):   
-            processed_words = preprocess(tweet)   
-            for word in processed_words:        
-                pair = (word, y)    
-                if pair in freq:
-                    freq[pair] += 1
-                else:
-                    freq[pair] = 1
-        return freq 
+all_tweets_df = pd.concat([positive_df, negative_df], ignore_index=True)
 
-    freq_dict = create_frequency_dict(all_tweets_df['tweet'].tolist(), all_tweets_df['label'].tolist())
 
-    def count_total_words(tweet):
-        positive_count = 0
-        negative_count = 0
-        for word in tweet:
-            positive_count += freq_dict.get((word, 1), 0)
-            negative_count += freq_dict.get((word, 0), 0)
-        return [positive_count, negative_count]
+X = all_tweets_df['tweet']
+y = all_tweets_df['label']
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
 
-    pro_tweet = preprocess(text)  
-    positive_count, negative_count = count_total_words(pro_tweet)
 
+vectorizer = TfidfVectorizer(tokenizer=custom_tokenizer, token_pattern=None)
+X_train_vec = vectorizer.fit_transform(X_train)
+X_test_vec = vectorizer.transform(X_test)
+
+
+model = MultinomialNB()
+model.fit(X_train_vec, y_train)
+
+
+y_pred = model.predict(X_test_vec)
+accuracy = accuracy_score(y_test, y_pred)
+precision = precision_score(y_test, y_pred)
+recall = recall_score(y_test, y_pred)
+f1 = f1_score(y_test, y_pred)
+
+print(f"Accuracy: {accuracy:.2f}")
+print(f"Precision: {precision:.2f}")
+print(f"Recall: {recall:.2f}")
+print(f"F1-score: {f1:.2f}")
+
+
+EVALUATION_METRICS = {
+    'accuracy': accuracy,
+    'precision': precision,
+    'recall': recall,
+    'f1': f1
+}
+
+
+PICKLE_PATH = os.path.join(os.path.dirname(__file__), 'sentiment_model.pkl')
+
+
+with open(PICKLE_PATH, 'wb') as f:
+    pickle.dump((model, vectorizer), f)
+
+def load_model():
     
-    sentiment_df = pd.DataFrame([[positive_count, negative_count]], columns=['Positive Count', 'Negative Count'])
-    sentiment_df['class'] = [1 if positive_count > negative_count else 0]
+    with open(PICKLE_PATH, 'rb') as f:
+        loaded_model, loaded_vectorizer = pickle.load(f)
+    return loaded_model, loaded_vectorizer
 
-    X = sentiment_df[['Positive Count', 'Negative Count']]
-    y = sentiment_df['class']
 
-    gnb = GaussianNB()
-    gnb.fit(X, y)
+_model, _vectorizer = load_model()
+
+def predict_tweet(tweet):
+    tweet_vec = _vectorizer.transform([tweet])
+    prediction = _model.predict(tweet_vec)[0]
+    probability = _model.predict_proba(tweet_vec)[0]
+    sentiment = "Positive" if prediction == 1 else "Negative"
+    return sentiment, probability
+
+def sentiment_view(request):
     
-    y_pred = gnb.predict(X)
-
-    accuracy = accuracy_score(y, y_pred)
-    precision = precision_score(y, y_pred)
-    recall = recall_score(y, y_pred)
-    f1 = f1_score(y, y_pred)
-
-    return sentiment_df['class'][0], accuracy, precision, recall, f1
-
-
-
-def home(request):
-    # هنا نخلي التويت القديمة تظهر في الصفحة
     if 'tweet_history' not in request.session:
         request.session['tweet_history'] = []
-    
-    # ناخذ النص من اليوزر ونعمل له تحليل
-    if request.method == 'POST':
-        text = request.POST.get('text', '')  
-        if text:
-            #نحلل النص بواسطة الدالة sentiment_analysis
-            sentiment, accuracy, precision, recall, f1 = sentiment_analysis(text)
-            
-            # التأكد من ان القيم هي ارقام بلغة بايثون 
-            sentiment = int(sentiment) #تحويل الى رقم صحيح int
-            accuracy = float(accuracy)  # تحويل الى رقم عشري float
-            precision = float(precision)  # تحويل الى رقم عشري float
-            recall = float(recall)  # تحويل الى رقم عشري float
-            f1 = float(f1)  # تحويل الى رقم عشري float
-            
-            tweet_data = {
-                'text': text,
-                'sentiment': sentiment,
-                'accuracy': accuracy,
-                'precision': precision,
-                'recall': recall,
-                'f1': f1
-            }
-            
-            # اضافة التويت الجديد الى التاريخ
-            tweet_history = request.session['tweet_history']
-            tweet_history.append(tweet_data)
-            request.session['tweet_history'] = tweet_history 
-    
-    # اعادة ترتيب التويتات بحيث يكون اخر تويت هو الاول
-    tweet_history = request.session.get('tweet_history', [])
-    tweet_history.reverse()
 
-    # اظهار الصفحة
-    return render(request, 'home.html', {'tweet_history': tweet_history})
+    if request.method == 'POST':
+        tweet_text = request.POST.get('text', '')
+        if tweet_text:
+            
+            sentiment, probability = predict_tweet(tweet_text)
+
+            
+            tweet_entry = {
+                'text': tweet_text,
+                'sentiment': sentiment,
+                'accuracy': EVALUATION_METRICS.get('accuracy', 0),
+                'precision': EVALUATION_METRICS.get('precision', 0),
+                'recall': EVALUATION_METRICS.get('recall', 0),
+                'f1': EVALUATION_METRICS.get('f1', 0),
+            }
+
+            
+            tweet_history = request.session['tweet_history']
+            tweet_history.insert(0, tweet_entry)
+
+            
+            tweet_history = tweet_history[:10]
+
+            
+            request.session['tweet_history'] = tweet_history
+
+   
+    context = {
+        'tweet_history': request.session.get('tweet_history', [])
+    }
+
+    return render(request, 'home.html', context)
